@@ -20,17 +20,18 @@ class NationBuilder:
         self.site_slug = site_slug
         self.calendar_id = calendar_id
 
-        self.nationbuilder_base_url = f"https://{nation_slug}.nationbuilder.com"
+        self.BASE_URL = f"https://{nation_slug}.nationbuilder.com"
+        self.EVENTS_PATH = f"/api/v1/sites/{self.site_slug}/pages/events"
 
     def get_events(self, **kwargs):
         return utils.Future(self.iter_events(**kwargs))
 
     def iter_events(self, path=None, **kwargs):
         if not path:
-            path = f"/api/v1/sites/{self.site_slug}/pages/events"
+            path = self.EVENTS_PATH
         kwargs["calendar_id"] = self.calendar_id
 
-        url = f"{self.nationbuilder_base_url}{path}"
+        url = f"{self.BASE_URL}{path}"
         params = urllib.parse.urlencode(kwargs)
         self.logger.info(f" GET {url}?{params}")
 
@@ -48,7 +49,6 @@ class NationBuilder:
             gcal.get_events(singleEvents=True, **kwargs), gcal, self
         )
 
-
 class NationBuilderSyncFuture:
     def __init__(
         self, gcal_get_events_future: Future, gcal: GoogleCalendar, nb: NationBuilder
@@ -59,48 +59,7 @@ class NationBuilderSyncFuture:
         self.requests = {"POST": {}, "PUT": {}, "DELETE": {}}
         self.responses = {"POST": {}, "PUT": {}, "DELETE": {}}
 
-    def callbackgen(self, verb):
-        """ Generate callback function to collect responses. """
-
-        # def callback(_, res, err):
-        #     if err:
-        #         raise err
-        #     facebook_id = res["extendedProperties"]["private"]["facebookId"]
-        #     self.responses[verb][facebook_id] = res
-
-        # return callback
-
-    def batchgen(self, method, verb):
-        """ Generate batched requests with callback. """
-        # requests = self.requests[verb]
-        # if any(requests):
-        #     count = 0
-        #     batch = self.calendar.batch(self.callbackgen(verb))
-        #     for req in requests.values():
-        #         self.calendar.logger.info(
-        #             "%s /%s/events/%s", verb, req["calendarId"], req.get("eventId", "")
-        #         )
-        #         batch.add(method(**req))
-        #         count += 1
-        #         if count == MAX_BATCH_REQUESTS:
-        #             count = 0
-        #             yield batch
-        #             batch = self.calendar.batch(self.callbackgen(verb))
-        #     yield batch
-
-    def execbatch(self, method, verb, dryrun=False):
-        """ Execute batches. """
-        # batches = self.batchgen(method, verb)
-        # for batch in batches:
-        #     if dryrun:
-        #         for req in batch._requests.values():
-        #             body = json.loads(req.body)
-        #             fid = body["extendedProperties"]["private"]["facebookId"]
-        #             self.responses[verb][fid] = body
-        #     else:
-        #         batch.execute()
-
-    def execute(self, dryrun=True):
+    def execute(self, dry_run=True):
         # Get Google Calendar events
         gcal_events = {x["id"]: x for x in self.gcal_get_events_future.execute()}
 
@@ -122,16 +81,16 @@ class NationBuilderSyncFuture:
 
         nb_events = {
             next(
-                str.removeprefix(t, EVENT_ID_PREFIX)
+                t.removeprefix(EVENT_ID_PREFIX)
                 for t in x["tags"]
-                if str.startswith(EVENT_ID_PREFIX)
+                if t.startswith(EVENT_ID_PREFIX)
             ): {
                 "digest": next(
-                    str.removeprefix(t, DIGEST_PREFIX)
+                    t.removeprefix(DIGEST_PREFIX)
                     for t in x["tags"]
-                    if str.startswith(DIGEST_PREFIX)
+                    if t.startswith(DIGEST_PREFIX)
                 ),
-                "nationbuilder_id": x["id"],
+                "nb_id": x["id"],
             }
             for x in self.nb.iter_events(
                 starting=min(start_times + end_times),
@@ -150,26 +109,53 @@ class NationBuilderSyncFuture:
             digest = utils.digest(event)
             if gcal_id not in nb_events:
                 self.requests["POST"][gcal_id] = {
-                    "body": gcal_to_nb(event, self.gcal.calendar_id),
+                    "event": gcal_to_nb(event, self.gcal.calendar_id, self.nb.calendar_id),
                 }
 
             elif digest != nb_events[gcal_id]["digest"]:
                 self.requests["PUT"][gcal_id] = {
-                    "id": nb_events[gcal_id]["nationbuilder_id"],
-                    "body": gcal_to_nb(event, self.gcal.calendar_id),
+                    "id": nb_events[gcal_id]["nb_id"],
+                    "event": gcal_to_nb(event, self.gcal.calendar_id, self.nb.calendar_id),
                 }
 
-        found_ids = {x["id"] for x in nb_events}
-
-        for gcal_id in nb_events.keys() - found_ids:
+        for gcal_id in nb_events.keys() - gcal_events.keys():
             self.requests["DELETE"][gcal_id] = {
-                "id": nb_events[gcal_id]["nationbuilder_id"]
+                "id": nb_events[gcal_id]["nb_id"]
             }
 
-        # Execute batched requests
-        print(json.dumps(self.requests, indent=4))
+        # Execute requests
+        api_events_url = (
+            f"{self.nb.BASE_URL}/api/v1/sites/{self.nb.site_slug}/pages/events"
+        )
 
-        # self.execbatch(some_insert_method, "POST", dryrun)
-        # self.execbatch(some_update_method, "PUT", dryrun)
-        # self.execbatch(some_delete_method, "DELETE", dryrun)
-        # return self
+        for nb_id, req in self.requests["POST"].items():
+            self.responses["POST"][nb_id] = (
+                req
+                if dry_run
+                else requests.post(
+                    api_events_url, json=req, params={"access_token": self.nb.api_token}
+                )
+            )
+
+        for nb_id, req in self.requests["PUT"].items():
+            self.responses["PUT"][nb_id] = (
+                req
+                if dry_run
+                else requests.put(
+                    f"{api_events_url}/{nb_id}",
+                    json=req,
+                    params={"access_token": self.nb.api_token},
+                )
+            )
+
+        for nb_id, req in self.requests["DELETE"].items():
+            self.responses["DELETE"][nb_id] = (
+                req
+                if dry_run
+                else requests.delete(
+                    f"{api_events_url}/{nb_id}",
+                    params={"access_token": self.nb.api_token},
+                )
+            )
+
+        return self
