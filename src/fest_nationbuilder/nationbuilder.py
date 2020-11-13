@@ -61,14 +61,22 @@ class NationBuilderSyncFuture:
         self.responses = {"POST": {}, "PUT": {}, "DELETE": {}}
 
     def execute(self, dry_run=True):
-        # Get Google Calendar events
-        gcal_events = {x["id"]: x for x in self.gcal_get_events_future.execute()}
+        gcal_events = self.get_gcal_events()
 
         if not any(gcal_events):
             self.nb.logger.info("NO-OP")
             return self
 
-        # Get NationBuilder events
+        min_time, max_time = self.get_time_boundaries(gcal_events)
+        nb_events = self.get_nb_events(min_time, max_time)
+
+        self.create_payloads(gcal_events, nb_events)
+        self.send_requests(dry_run)
+
+        return self
+
+    @staticmethod
+    def get_time_boundaries(gcal_events):
         start_times = [
             x["start"]["dateTime"]
             for x in gcal_events.values()
@@ -84,8 +92,13 @@ class NationBuilderSyncFuture:
         max_time = (
             parser.parse(max(start_times + end_times)) + datetime.timedelta(seconds=1)
         ).astimezone(tz.UTC)
+        return min_time, max_time
 
-        nb_events = {
+    def get_gcal_events(self):
+        return {x["id"]: x for x in self.gcal_get_events_future.execute()}
+
+    def get_nb_events(self, min_time, max_time):
+        return {
             next(
                 t.removeprefix(EVENT_ID_PREFIX)
                 for t in x["tags"]
@@ -105,7 +118,7 @@ class NationBuilderSyncFuture:
             if "gcal_id:" + self.gcal.calendar_id in x["tags"]
         }
 
-        # Get create/update/delete request payloads
+    def create_payloads(self, gcal_events, nb_events):
         for gcal_id, event in gcal_events.items():
             digest = utils.digest(event)
             if gcal_id not in nb_events:
@@ -126,7 +139,7 @@ class NationBuilderSyncFuture:
         for gcal_id in nb_events.keys() - gcal_events.keys():
             self.requests["DELETE"][gcal_id] = {"id": nb_events[gcal_id]["nb_id"]}
 
-        # Execute requests
+    def send_requests(self, dry_run):
         api_events_url = (
             f"{self.nb.BASE_URL}/api/v1/sites/{self.nb.site_slug}/pages/events"
         )
@@ -162,5 +175,3 @@ class NationBuilderSyncFuture:
                     params={"access_token": self.nb.api_token},
                 )
             )
-
-        return self
