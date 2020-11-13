@@ -5,7 +5,7 @@ def gcal_to_nb(gcal_event, gcal_calendar_id, nb_calendar_id):
     """ Convert a Google Calendar event to a NationBuilder event. """
     return {
         "calendar_id": nb_calendar_id,
-        "status": "unlisted",
+        "status": "published",
         "name": gcal_event["summary"],
         "intro": gcal_event.get("description"),
         "start_time": gcal_event["start"]["dateTime"],
