@@ -3,6 +3,7 @@ import json
 import urllib
 
 import requests
+from dateutil import parser, tz
 from fest import utils
 from fest.google import GoogleCalendar
 from fest.utils import Future
@@ -49,6 +50,7 @@ class NationBuilder:
             gcal.get_events(singleEvents=True, **kwargs), gcal, self
         )
 
+
 class NationBuilderSyncFuture:
     def __init__(
         self, gcal_get_events_future: Future, gcal: GoogleCalendar, nb: NationBuilder
@@ -79,6 +81,11 @@ class NationBuilderSyncFuture:
             if x.get("end", {}).get("dateTime")
         ]
 
+        min_time = parser.parse(min(start_times + end_times)).astimezone(tz.UTC)
+        max_time = (
+            parser.parse(max(start_times + end_times)) + datetime.timedelta(seconds=1)
+        ).astimezone(tz.UTC)
+
         nb_events = {
             next(
                 t.removeprefix(EVENT_ID_PREFIX)
@@ -93,13 +100,8 @@ class NationBuilderSyncFuture:
                 "nb_id": x["id"],
             }
             for x in self.nb.iter_events(
-                starting=min(start_times + end_times),
-                until=str(
-                    datetime.datetime.strptime(
-                        max(start_times + end_times), "%Y-%m-%dT%H:%M:%S%z"
-                    )
-                    + datetime.timedelta(seconds=1)
-                ),
+                starting=str(min_time),
+                until=str(max_time),
             )
             if "gcal_id:" + self.gcal.calendar_id in x["tags"]
         }
@@ -109,51 +111,55 @@ class NationBuilderSyncFuture:
             digest = utils.digest(event)
             if gcal_id not in nb_events:
                 self.requests["POST"][gcal_id] = {
-                    "event": gcal_to_nb(event, self.gcal.calendar_id, self.nb.calendar_id),
+                    "event": gcal_to_nb(
+                        event, self.gcal.calendar_id, self.nb.calendar_id
+                    ),
                 }
 
             elif digest != nb_events[gcal_id]["digest"]:
                 self.requests["PUT"][gcal_id] = {
                     "id": nb_events[gcal_id]["nb_id"],
-                    "event": gcal_to_nb(event, self.gcal.calendar_id, self.nb.calendar_id),
+                    "event": gcal_to_nb(
+                        event, self.gcal.calendar_id, self.nb.calendar_id
+                    ),
                 }
 
         for gcal_id in nb_events.keys() - gcal_events.keys():
-            self.requests["DELETE"][gcal_id] = {
-                "id": nb_events[gcal_id]["nb_id"]
-            }
+            self.requests["DELETE"][gcal_id] = {"id": nb_events[gcal_id]["nb_id"]}
 
         # Execute requests
         api_events_url = (
             f"{self.nb.BASE_URL}/api/v1/sites/{self.nb.site_slug}/pages/events"
         )
 
-        for nb_id, req in self.requests["POST"].items():
-            self.responses["POST"][nb_id] = (
+        for gcal_id, req in self.requests["POST"].items():
+            self.responses["POST"][gcal_id] = (
                 req
                 if dry_run
                 else requests.post(
-                    api_events_url, json=req, params={"access_token": self.nb.api_token}
-                )
-            )
-
-        for nb_id, req in self.requests["PUT"].items():
-            self.responses["PUT"][nb_id] = (
-                req
-                if dry_run
-                else requests.put(
-                    f"{api_events_url}/{nb_id}",
+                    api_events_url,
                     json=req,
                     params={"access_token": self.nb.api_token},
                 )
             )
 
-        for nb_id, req in self.requests["DELETE"].items():
-            self.responses["DELETE"][nb_id] = (
+        for gcal_id, req in self.requests["PUT"].items():
+            self.responses["PUT"][gcal_id] = (
+                req
+                if dry_run
+                else requests.put(
+                    f"{api_events_url}/{req['id']}",
+                    json=req,
+                    params={"access_token": self.nb.api_token},
+                )
+            )
+
+        for gcal_id, req in self.requests["DELETE"].items():
+            self.responses["DELETE"][gcal_id] = (
                 req
                 if dry_run
                 else requests.delete(
-                    f"{api_events_url}/{nb_id}",
+                    f"{api_events_url}/{req['id']}",
                     params={"access_token": self.nb.api_token},
                 )
             )
